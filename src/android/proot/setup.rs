@@ -221,22 +221,156 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
                 ))
                 .pb_expect(&format!("Failed to send log message"));
 
-            // Create necessary directories - don't fail if they already exist
-            let _ = fs::create_dir_all(fs_root.join("proc"));
-            let _ = fs::create_dir_all(fs_root.join("sys"));
-            let _ = fs::create_dir_all(fs_root.join("sys/.empty"));
+            log::info!("[simulate_linux_sysdata] Starting system data simulation");
 
-            // Set permissions - only try to set permissions if we're on Unix and have the capability
-            #[cfg(unix)]
+            // Create necessary directories - don't fail if they already exist
+            let proc_path = fs_root.join("proc");
+            let sys_path = fs_root.join("sys");
+            let sys_empty_path = fs_root.join("sys/.empty");
+
+            log::info!(
+                "[simulate_linux_sysdata] Creating directory: {:?}",
+                proc_path
+            );
+            match fs::create_dir_all(&proc_path) {
+                Ok(_) => log::info!(
+                    "[simulate_linux_sysdata] Successfully created directory: {:?}",
+                    proc_path
+                ),
+                Err(e) => log::info!(
+                    "[simulate_linux_sysdata] Directory creation result for {:?}: {}",
+                    proc_path,
+                    e
+                ),
+            }
+
+            log::info!(
+                "[simulate_linux_sysdata] Creating directory: {:?}",
+                sys_path
+            );
+            match fs::create_dir_all(&sys_path) {
+                Ok(_) => log::info!(
+                    "[simulate_linux_sysdata] Successfully created directory: {:?}",
+                    sys_path
+                ),
+                Err(e) => log::info!(
+                    "[simulate_linux_sysdata] Directory creation result for {:?}: {}",
+                    sys_path,
+                    e
+                ),
+            }
+
+            log::info!(
+                "[simulate_linux_sysdata] Creating directory: {:?}",
+                sys_empty_path
+            );
+            match fs::create_dir_all(&sys_empty_path) {
+                Ok(_) => log::info!(
+                    "[simulate_linux_sysdata] Successfully created directory: {:?}",
+                    sys_empty_path
+                ),
+                Err(e) => log::info!(
+                    "[simulate_linux_sysdata] Directory creation result for {:?}: {}",
+                    sys_empty_path,
+                    e
+                ),
+            }
+
+            // Set permissions using Android's built-in chmod
+            log::info!(
+                "[simulate_linux_sysdata] Setting permissions 700 on {:?}",
+                proc_path
+            );
+            match std::process::Command::new("chmod")
+                .arg("700")
+                .arg(&proc_path)
+                .output()
             {
-                // Try to set permissions, but don't fail if we can't
-                let _ =
-                    fs::set_permissions(fs_root.join("proc"), fs::Permissions::from_mode(0o700));
-                let _ = fs::set_permissions(fs_root.join("sys"), fs::Permissions::from_mode(0o700));
-                let _ = fs::set_permissions(
-                    fs_root.join("sys/.empty"),
-                    fs::Permissions::from_mode(0o700),
-                );
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    log::info!(
+                        "[simulate_linux_sysdata] chmod 700 on proc - exit code: {:?}",
+                        output.status.code()
+                    );
+                    log::info!("[simulate_linux_sysdata] chmod proc stdout: {}", stdout);
+                    log::info!("[simulate_linux_sysdata] chmod proc stderr: {}", stderr);
+                    if !output.status.success() {
+                        log::error!(
+                            "[simulate_linux_sysdata] chmod 700 on proc failed with status: {:?}",
+                            output.status
+                        );
+                    }
+                }
+                Err(e) => log::error!(
+                    "[simulate_linux_sysdata] Failed to execute chmod on proc: {}",
+                    e
+                ),
+            }
+
+            log::info!(
+                "[simulate_linux_sysdata] Setting permissions 700 on {:?}",
+                sys_path
+            );
+            match std::process::Command::new("chmod")
+                .arg("700")
+                .arg(&sys_path)
+                .output()
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    log::info!(
+                        "[simulate_linux_sysdata] chmod 700 on sys - exit code: {:?}",
+                        output.status.code()
+                    );
+                    log::info!("[simulate_linux_sysdata] chmod sys stdout: {}", stdout);
+                    log::info!("[simulate_linux_sysdata] chmod sys stderr: {}", stderr);
+                    if !output.status.success() {
+                        log::error!(
+                            "[simulate_linux_sysdata] chmod 700 on sys failed with status: {:?}",
+                            output.status
+                        );
+                    }
+                }
+                Err(e) => log::error!(
+                    "[simulate_linux_sysdata] Failed to execute chmod on sys: {}",
+                    e
+                ),
+            }
+
+            log::info!(
+                "[simulate_linux_sysdata] Setting permissions 700 on {:?}",
+                sys_empty_path
+            );
+            match std::process::Command::new("chmod")
+                .arg("700")
+                .arg(&sys_empty_path)
+                .output()
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    log::info!(
+                        "[simulate_linux_sysdata] chmod 700 on sys/.empty - exit code: {:?}",
+                        output.status.code()
+                    );
+                    log::info!(
+                        "[simulate_linux_sysdata] chmod sys/.empty stdout: {}",
+                        stdout
+                    );
+                    log::info!(
+                        "[simulate_linux_sysdata] chmod sys/.empty stderr: {}",
+                        stderr
+                    );
+                    if !output.status.success() {
+                        log::error!("[simulate_linux_sysdata] chmod 700 on sys/.empty failed with status: {:?}", output.status);
+                    }
+                }
+                Err(e) => log::error!(
+                    "[simulate_linux_sysdata] Failed to execute chmod on sys/.empty: {}",
+                    e
+                ),
             }
 
             // Create fake proc files
@@ -250,10 +384,30 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
                     ("proc/.sysctl_inotify_max_user_watches", "4096\n"),
                 ];
 
+            log::info!(
+                "[simulate_linux_sysdata] Creating {} proc files",
+                proc_files.len()
+            );
             for (path, content) in proc_files {
-                let _ = fs::write(fs_root.join(path), content)
-                    .pb_expect(&format!("Permission denied while writing to {}", path));
+                let file_path = fs_root.join(path);
+                log::info!("[simulate_linux_sysdata] Writing file: {:?}", file_path);
+                match fs::write(&file_path, content) {
+                    Ok(_) => log::info!(
+                        "[simulate_linux_sysdata] Successfully wrote file: {:?}",
+                        file_path
+                    ),
+                    Err(e) => {
+                        log::error!(
+                            "[simulate_linux_sysdata] Failed to write file {:?}: {}",
+                            file_path,
+                            e
+                        );
+                        panic!("Permission denied while writing to {}", path);
+                    }
+                }
             }
+
+            log::info!("[simulate_linux_sysdata] System data simulation completed");
         }));
     }
     None
