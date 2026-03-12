@@ -86,10 +86,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                         Err(err) => {
                             emit_setup_error(
                                 &mpsc_sender,
-                                format!(
-                                    "Failed to download Arch Linux FS: {}. Retrying...",
-                                    err
-                                ),
+                                format!("Failed to download Arch Linux FS: {}. Retrying...", err),
                             );
                             continue;
                         }
@@ -171,7 +168,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                 // Ensure the extracted directory is clean
                 let _ = fs::remove_dir_all(&extracted_dir);
 
-                // Extract tar file directly to the final destination
+                // Extract tar file
                 let tar_file = File::open(&temp_file)
                     .pb_expect("Failed to open downloaded Arch Linux FS file");
                 let tar = XzDecoder::new(tar_file);
@@ -200,11 +197,13 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
             }
 
             // Move the extracted files to the final destination
-            fs::rename(&extracted_dir, fs_root)
-                .pb_expect("Failed to rename extracted files to final destination");
+            let _ = std::process::Command::new("mv")
+                .arg(&extracted_dir)
+                .arg(fs_root)
+                .output();
 
             // Clean up the temporary file
-            fs::remove_file(&temp_file).pb_expect("Failed to remove temporary file");
+            let _ = fs::remove_file(&temp_file);
         }));
     }
     None
