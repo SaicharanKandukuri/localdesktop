@@ -44,6 +44,8 @@ pub mod apk {
         dependencies: Vec<String>,
         #[serde(default)]
         wry: bool,
+        #[serde(default)]
+        ndk_version: Option<String>,
     }
 
     #[derive(Clone, Debug, Default, Deserialize)]
