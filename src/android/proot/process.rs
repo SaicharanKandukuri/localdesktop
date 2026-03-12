@@ -132,6 +132,8 @@ impl ArchProcess {
             .arg("--sysvipc")
             .arg("--kill-on-exit")
             .arg("--root-id")
+            .arg("--bind=/system")
+            .arg("--bind=/linkerconfig/ld.config.txt")
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
@@ -179,7 +181,8 @@ impl ArchProcess {
             )
             .env("TMPDIR", "/tmp")
             .env("USER", user)
-            .env("LOGNAME", user);
+            .env("LOGNAME", user)
+            .env_remove("LD_PRELOAD");
         process
     }
 
