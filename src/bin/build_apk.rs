@@ -219,15 +219,16 @@ pub mod apk {
                 manifest.version_code = Some(code.to_code(1));
             }
         }
-        let target_sdk_version = 33;
+        let compile_sdk_version = 36;
+        let target_sdk_version = 28;
         let target_sdk_codename = 13;
         let min_sdk_version = 21;
         manifest
             .compile_sdk_version
-            .get_or_insert(target_sdk_version);
+            .get_or_insert(compile_sdk_version);
         manifest
             .platform_build_version_code
-            .get_or_insert(target_sdk_version);
+            .get_or_insert(compile_sdk_version);
         manifest
             .compile_sdk_version_codename
             .get_or_insert(target_sdk_codename);
@@ -380,7 +381,9 @@ pub mod apk {
             for entry in entries {
                 let entry = entry?;
                 let path = entry.path();
-                if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("so") {
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_file() && file_name.contains(".so") {
+                    println!(path.to_str());
                     libraries.push(path);
                 }
             }

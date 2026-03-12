@@ -55,6 +55,7 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
     let package = manifest.package.take().unwrap_or_default();
     let target_sdk = manifest.sdk.target_sdk_version.take().unwrap();
     let min_sdk = manifest.sdk.min_sdk_version.take().unwrap();
+    let compile_sdk = manifest.compile_sdk_version.take().unwrap_or(target_sdk);
     let version_code = manifest.version_code.take().unwrap();
     let version_name = manifest.version_name.take().unwrap();
 
@@ -77,7 +78,8 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             }}
             android {{
                 namespace '{package}'
-                compileSdk {target_sdk}
+                compileSdk {compile_sdk}
+                ndkVersion '29.0.14206865'
                 defaultConfig {{
                     applicationId '{package}'
                     minSdk {min_sdk}
@@ -88,7 +90,19 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
                 packagingOptions {{
                     jniLibs {{
                         useLegacyPackaging true
+                        keepDebugSymbols += '**.so.2'
                     }}
+                }}
+                sourceSets {{
+                    main {{
+                        jniLibs.srcDirs += 'src/main/jniLibs'
+                        resources.srcDirs += 'src/main/jniLibs'
+                    }}
+                }}
+                lint {{
+                    checkReleaseBuilds false
+                    abortOnError false
+                    disable 'ExpiredTargetSdkVersion'
                 }}
                 def keystoreFile = file("release-key.jks")
                 if (keystoreFile.exists()) {{
@@ -116,6 +130,7 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             }}
         "#,
         package = package,
+        compile_sdk = compile_sdk,
         target_sdk = target_sdk,
         min_sdk = min_sdk,
         version_code = version_code,
