@@ -103,7 +103,6 @@ pub fn build(env: &BuildEnv) -> Result<()> {
                         )
                     })?;
                 search_paths.push(deps_dir);
-                let search_paths = search_paths.iter().map(AsRef::as_ref).collect::<Vec<_>>();
 
                 let ndk_sysroot_libs = ndk.join("usr/lib").join(target.ndk_triple());
                 let provided_libs_paths = [
@@ -140,11 +139,15 @@ pub fn build(env: &BuildEnv) -> Result<()> {
                     for entry in entries {
                         let entry = entry?;
                         let path = entry.path();
-                        if !path.is_dir() && path.extension() == Some(OsStr::new("so")) {
+                        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if !path.is_dir() && file_name.contains(".so") {
                             explicit_libs.push(path);
                         }
                     }
+                    search_paths.push(abi_dir);
                 }
+
+                let search_paths = search_paths.iter().map(AsRef::as_ref).collect::<Vec<_>>();
 
                 // Collect the names of libraries provided by the user, and assume these
                 // are available for other dependencies to link to, too.
