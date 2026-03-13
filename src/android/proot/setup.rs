@@ -29,9 +29,7 @@ use std::{
     },
     thread::{self, JoinHandle},
 };
-use tar::Archive;
 use winit::platform::android::activity::AndroidApp;
-use xz2::read::XzDecoder;
 
 #[derive(Debug)]
 pub enum SetupMessage {
@@ -62,9 +60,9 @@ fn emit_setup_error(sender: &Sender<SetupMessage>, message: impl Into<String>) {
 
 fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
     let context = get_application_context();
-    let temp_file = context.data_dir.join("archlinux-fs.tar.xz");
+    let temp_file = context.data_dir.join("ubuntu-fs.tar.gz");
+    let local_file = Path::new("/data/local/tmp/linuxfs-stripped.tar.gz");
     let fs_root = Path::new(ARCH_FS_ROOT);
-    let extracted_dir = context.data_dir.join("archlinux-aarch64");
     let mpsc_sender = options.mpsc_sender.clone();
 
     // Only run if the fs_root is missing or empty
@@ -72,12 +70,30 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
     let need_setup = fs_root.read_dir().map_or(true, |mut d| d.next().is_none());
     if need_setup {
         return Some(thread::spawn(move || {
+            // Check for local file first
+            if local_file.exists() && !temp_file.exists() {
+                mpsc_sender
+                    .send(SetupMessage::Progress(
+                        "Using local Ubuntu FS from /data/local/tmp...".to_string(),
+                    ))
+                    .pb_expect("Failed to send log message");
+
+                if let Err(e) = fs::copy(local_file, &temp_file) {
+                    emit_setup_error(
+                        &mpsc_sender,
+                        format!("Failed to copy local file: {}. Will try download...", e),
+                    );
+                } else {
+                    log::info!("Copied local file from {:?} to {:?}", local_file, temp_file);
+                }
+            }
+
             // Download if the archive doesn't exist
             loop {
                 if !temp_file.exists() {
                     mpsc_sender
                         .send(SetupMessage::Progress(
-                            "Downloading Arch Linux FS...".to_string(),
+                            "Downloading Ubuntu FS...".to_string(),
                         ))
                         .pb_expect("Failed to send log message");
 
@@ -86,7 +102,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                         Err(err) => {
                             emit_setup_error(
                                 &mpsc_sender,
-                                format!("Failed to download Arch Linux FS: {}. Retrying...", err),
+                                format!("Failed to download Ubuntu FS: {}. Retrying...", err),
                             );
                             continue;
                         }
@@ -144,7 +160,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                                 let total_mb = total_size as f64 / 1024.0 / 1024.0;
                                 mpsc_sender
                                     .send(SetupMessage::Progress(format!(
-                                        "Downloading Arch Linux FS... {}% ({:.2} MB / {:.2} MB)",
+                                        "Downloading Ubuntu FS... {}% ({:.2} MB / {:.2} MB)",
                                         percent, downloaded_mb, total_mb
                                     )))
                                     .unwrap_or(());
@@ -161,46 +177,54 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
 
                 mpsc_sender
                     .send(SetupMessage::Progress(
-                        "Extracting Arch Linux FS...".to_string(),
+                        "Extracting Ubuntu FS...".to_string(),
                     ))
                     .pb_expect("Failed to send log message");
 
-                // Ensure the extracted directory is clean
-                let _ = fs::remove_dir_all(&extracted_dir);
+                // Ensure the target directory is clean and exists
+                let _ = fs::remove_dir_all(fs_root);
+                fs::create_dir_all(fs_root).pb_expect("Failed to create target directory");
 
-                // Extract tar file
-                let tar_file = File::open(&temp_file)
-                    .pb_expect("Failed to open downloaded Arch Linux FS file");
-                let tar = XzDecoder::new(tar_file);
-                let mut archive = Archive::new(tar);
+                // Extract using proot + tar to avoid permission issues
+                let temp_file_str = temp_file.to_str().unwrap();
+                let fs_root_str = fs_root.to_str().unwrap();
 
-                // Try to extract, if it fails, remove temp file and restart download
-                if let Err(e) = archive.unpack(context.data_dir.clone()) {
-                    // Clean up the failed extraction
-                    let _ = fs::remove_dir_all(&extracted_dir);
-                    let _ = fs::remove_file(&temp_file);
-
-                    emit_setup_error(
-                        &mpsc_sender,
-                        format!(
-                            "Failed to extract Arch Linux FS: {}. Restarting download...",
-                            e
-                        ),
-                    );
-
-                    // Continue the outer loop to retry the download
-                    continue;
+                match ArchProcess::extract_rootfs(temp_file_str, fs_root_str) {
+                    Ok(status) => {
+                        log::info!(
+                            "Rootfs extraction completed with status: {:?}",
+                            status.code()
+                        );
+                        // Check if critical directories exist (tar may fail on absolute paths but most files extract)
+                        if fs_root.join("usr").exists() && fs_root.join("bin").exists() {
+                            log::info!("Rootfs appears valid despite tar exit code");
+                        } else {
+                            log::error!("Rootfs extraction appears incomplete");
+                            let _ = fs::remove_dir_all(fs_root);
+                            let _ = fs::remove_file(&temp_file);
+                            emit_setup_error(
+                                &mpsc_sender,
+                                "Rootfs extraction incomplete".to_string(),
+                            );
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to execute rootfs extraction: {}", e);
+                        // Clean up the failed extraction
+                        let _ = fs::remove_dir_all(fs_root);
+                        let _ = fs::remove_file(&temp_file);
+                        emit_setup_error(
+                            &mpsc_sender,
+                            format!("Failed to execute extraction command: {}", e),
+                        );
+                        continue;
+                    }
                 }
 
                 // If we get here, extraction was successful
                 break;
             }
-
-            // Move the extracted files to the final destination
-            let _ = std::process::Command::new("mv")
-                .arg(&extracted_dir)
-                .arg(fs_root)
-                .output();
 
             // Clean up the temporary file
             let _ = fs::remove_file(&temp_file);
@@ -1014,47 +1038,83 @@ Hidden=true
     None
 }
 
-fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
+fn fix_xkb_symlink(_options: &SetupOptions) -> StageOutput {
+    // Skip xkb symlink fix for Ubuntu rootfs
+    None
+}
+
+/// Patch Ubuntu rootfs with fake proc files and Android-specific configurations
+fn patch_ubuntu_rootfs(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
-    let xkb_path = fs_root.join("usr/share/X11/xkb");
     let mpsc_sender = options.mpsc_sender.clone();
 
-    if let Ok(meta) = fs::symlink_metadata(&xkb_path) {
-        if meta.file_type().is_symlink() {
-            if let Ok(target) = fs::read_link(&xkb_path) {
-                if target.is_absolute() {
-                    log::info!(
-                        "Absolute symlink target detected: {} -> {}. This is a problem because libxkbcommon is loaded in NDK, whose / is not Arch FS root!",
-                        xkb_path.display(),
-                        target.display()
-                    );
-                    // Compute the relative path from /usr/share/X11/xkb to /usr/share/xkeyboard-config-2
-                    // Both are inside the chroot, so strip the fs_root prefix
-                    let xkb_inside = Path::new("/usr/share/X11/xkb");
-                    let target_inside = Path::new("/usr/share/xkeyboard-config-2");
-                    let rel_target = diff_paths(target_inside, xkb_inside.parent().unwrap())
-                        .unwrap_or_else(|| target_inside.to_path_buf());
-                    log::info!(
-                        "Fixing with new relative symlink: {} -> {}",
-                        xkb_path.display(),
-                        rel_target.display()
-                    );
-                    // Remove the old symlink
-                    let _ = fs::remove_file(&xkb_path);
-                    // Create the new relative symlink
-                    if let Err(e) = symlink(&rel_target, &xkb_path) {
-                        mpsc_sender
-                            .send(SetupMessage::Error(format!(
-                                "Failed to create relative symlink for xkb: {}",
-                                e
-                            )))
-                            .unwrap_or(());
-                    }
-                }
-            }
-        }
+    // Check if already patched
+    if fs_root.join("etc/hosts.patched").exists() {
+        return None;
     }
-    None
+
+    mpsc_sender
+        .send(SetupMessage::Progress(
+            "Patching Ubuntu rootfs...".to_string(),
+        ))
+        .unwrap_or(());
+
+    Some(thread::spawn(move || {
+        log::info!("[patch_ubuntu] Starting rootfs patching");
+
+        // Create necessary directories
+        let _ = fs::create_dir_all(fs_root.join("dev"));
+        let _ = fs::create_dir_all(fs_root.join("sys"));
+        let _ = fs::create_dir_all(fs_root.join("proc"));
+        let _ = fs::create_dir_all(fs_root.join("dev/shm"));
+
+        // Set permissions on /proc
+        let _ = std::process::Command::new("chmod")
+            .arg("700")
+            .arg(fs_root.join("proc"))
+            .output();
+
+        // Create fake /proc/version
+        let version_content = "Linux version 5.19.0-76051900-faked (udroid@RandomCoder.org) #202207312230~1660780566~22.04~9d60db1 SMP PREEMPT_DYNAMIC Thu A\n";
+        let _ = fs::write(fs_root.join("proc/.version"), version_content);
+
+        // Create fake /proc/uptime
+        let _ = fs::write(fs_root.join("proc/.uptime"), "7857.09 54258.46\n");
+
+        // Create fake /proc/loadavg
+        let _ = fs::write(
+            fs_root.join("proc/.loadavg"),
+            "16.98 17.85 18.62 1/4050 18463\n",
+        );
+
+        // Create fake /proc/stat (minimal)
+        let _ = fs::write(fs_root.join("proc/.stat"), "cpu  240441 136982 262130 1546780 8977 0 12736 0 0 0\ncpu0 41348 30244 47145 148451 681 0 4488 0 0 0\nintr 15450380 0 0 0 0 0 0 0 675060 660856 664695 670871 510571 494303 405240 318695 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 55049 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 915 0 0 24484 0 3948 0 3948 0 0 14320 0 0 0 0 0 14320 0 0 0 188358 0 0 2 0 0 0 0 0 0 0 0 0 0 0 0 14 0 0 0 1091 0 1145821 0 0 0 2064 5105 0 2 2978 143260 36588 175214 2310 144623 667 722008 0 0 0 7060 0 0 19562 19561 19567 19564 20665 20665 20048 20045 24678 20666 20665 0 4248 0 0 74320 68 143602 21527 0 142 0 266 0 26 0 0 0 0 2078 70 0 0 0 1 152 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 9160 0 0 1 51976 5 0 0 0 8028 0 0 0 1\nctxt 20705676\nbtime 1666933600\nprocesses 77409\nprocs_running 3\nprocs_blocked 0\nsoftirq 8877573 71 2578491 2414 766392 698255 0 14365 2439309 0 2378276\n");
+
+        // Create fake /proc/vmstat (minimal)
+        let _ = fs::write(fs_root.join("proc/.vmstat"), "nr_free_pages 797479\nnr_zone_inactive_anon 1350842\nnr_zone_active_anon 5792\nnr_zone_inactive_file 452524\nnr_zone_active_file 1235888\nnr_zone_unevictable 40\nnr_zone_write_pending 21\nnr_mlock 40\nnr_bounce 0\nnr_zspages 0\nnr_free_cma 0\nnuma_hit 62193717\nnuma_miss 0\nnuma_foreign 0\nnuma_interleave 1685\nnuma_local 62193717\nnuma_other 0\nnr_inactive_anon 1350842\nnr_active_anon 5792\nnr_inactive_file 452524\nnr_active_file 1235888\nnr_unevictable 40\nnr_slab_reclaimable 90461\nnr_slab_unreclaimable 46994\nnr_isolated_anon 0\nnr_isolated_file 0\nworkingset_nodes 26540\nworkingset_refault_anon 30\nworkingset_refault_file 61857\nworkingset_activate_anon 29\nworkingset_activate_file 58699\nworkingset_restore_anon 8\nworkingset_restore_file 10680\nworkingset_nodereclaim 1792\nnr_anon_pages 1258098\nnr_mapped 336800\nnr_file_pages 1787020\nnr_dirty 21\nnr_writeback 0\nnr_writeback_temp 0\nnr_shmem 100931\nnr_shmem_hugepages 0\nnr_shmem_pmdmapped 0\nnr_file_hugepages 0\nnr_file_pmdmapped 0\nnr_anon_transparent_hugepages 0\nnr_vmscan_write 199\nnr_vmscan_immediate_reclaim 64\nnr_dirtied 3125493\nnr_written 2724601\nnr_throttled_written 0\nnr_kernel_misc_reclaimable 0\nnr_foll_pin_acquired 0\nnr_foll_pin_released 0\nnr_kernel_stack 24176\nnr_page_table_pages 15826\nnr_swapcached 47\npgpromote_success 0\nnr_dirty_threshold 65536\nnr_dirty_background_threshold 32768\npgpgin 3980696\npgpgout 11524509\npswpin 30\npswpout 199\npgalloc_dma 1\npgalloc_dma32 3665609\npgalloc_normal 58548953\npgalloc_movable 0\nallocstall_dma 0\nallocstall_dma32 0\nallocstall_normal 83\nallocstall_movable 24\npgskip_dma 0\npgskip_dma32 0\npgskip_normal 0\npgskip_movable 0\npgfree 63437677\npgactivate 2588607\npgdeactivate 289583\npglazyfree 28031\npgfault 41043642\npgmajfault 17041\npglazyfreed 0\npgrefill 318961\npgreuse 4096458\npgsteal_kswapd 1325091\npgsteal_direct 21698\npgdemote_kswapd 0\npgdemote_direct 0\npgscan_kswapd 1589709\npgscan_direct 23668\npgscan_direct_throttle 0\npgscan_anon 55038\npgscan_file 1558339\npgsteal_anon 194\npgsteal_file 1346595\nzone_reclaim_failed 0\npginodesteal 0\nslabs_scanned 327296\nkswapd_inodesteal 1010\nkswapd_low_wmark_hit_quickly 276\nkswapd_high_wmark_hit_quickly 38\npageoutrun 474\npgrotated 436\ndrop_pagecache 0\ndrop_slab 0\noom_kill 0\nnuma_pte_updates 0\nnuma_huge_pte_updates 0\nnuma_hint_faults 0\nnuma_hint_faults_local 0\nnuma_pages_migrated 0\npgmigrate_success 345763\npgmigrate_fail 90\nthp_migration_success 0\nthp_migration_fail 0\nthp_migration_split 0\ncompact_migrate_scanned 2693820\ncompact_free_scanned 14772930\ncompact_isolated 704787\ncompact_stall 0\ncompact_fail 0\ncompact_success 0\ncompact_daemon_wake 290\ncompact_daemon_migrate_scanned 86861\ncompact_daemon_free_scanned 797667\nhtlb_buddy_alloc_success 0\nhtlb_buddy_alloc_fail 0\nunevictable_pgs_culled 369346\nunevictable_pgs_scanned 0\nunevictable_pgs_rescued 271919\nunevictable_pgs_mlocked 274444\nunevictable_pgs_munlocked 274400\nunevictable_pgs_cleared 0\nunevictable_pgs_stranded 4\nthp_fault_alloc 1\nthp_fault_fallback 0\nthp_fault_fallback_charge 0\nthp_collapse_alloc 0\nthp_collapse_alloc_failed 0\nthp_file_alloc 0\nthp_file_fallback 0\nthp_file_fallback_charge 0\nthp_file_mapped 0\nthp_split_page 0\nthp_split_page_failed 0\nthp_deferred_split_page 0\nthp_split_pmd 0\nthp_scan_exceed_none_pte 0\nthp_scan_exceed_swap_pte 0\nthp_scan_exceed_share_pte 0\nthp_split_pud 0\nthp_zero_page_alloc 0\nthp_zero_page_alloc_failed 0\nthp_swpout 0\nthp_swpout_fallback 0\nballoon_inflate 0\nballoon_deflate 0\nballoon_migrate 0\nswap_ra 21\nswap_ra_hit 7\nksm_swpin_copy 0\ncow_ksm 0\nzswpin 0\nzswpout 0\ndirect_map_level2_splits 409\ndirect_map_level3_splits 9\nnr_unstable 0\n");
+
+        // Create /etc/hosts for connectivity
+        let hosts_content = "127.0.0.1 localhost\n127.0.0.1 localhost.localdomain\n127.0.0.1 local\n255.255.255.255 broadcasthost\n::1 localhost\n::1 ip6-localhost\n::1 ip6-loopback\nfe80::1%lo0 localhost\nff00::0 ip6-localnet\nff00::0 ip6-mcastprefix\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\nff02::3 ip6-allhosts\n";
+        let _ = fs::write(fs_root.join("etc/hosts"), hosts_content);
+
+        // Create /etc/resolv.conf for DNS
+        let resolv_content = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n";
+        let _ = fs::write(fs_root.join("etc/resolv.conf"), resolv_content);
+
+        // Fix sudo permissions
+        let sudo_path = fs_root.join("usr/bin/sudo");
+        if sudo_path.exists() {
+            let _ = std::process::Command::new("chmod")
+                .arg("u+s")
+                .arg(&sudo_path)
+                .output();
+        }
+
+        // Create marker file to indicate patching is complete
+        let _ = fs::write(fs_root.join("etc/hosts.patched"), "1\n");
+
+        log::info!("[patch_ubuntu] Rootfs patching completed");
+    }))
 }
 
 pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
@@ -1082,13 +1142,10 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
     };
 
     let stages: Vec<SetupStage> = vec![
-        Box::new(setup_arch_fs),                // Step 1. Setup Arch FS (extract)
+        Box::new(setup_arch_fs),                // Step 1. Setup Ubuntu FS (extract)
         Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
-        Box::new(configure_pacman_for_android), // Step 3. Configure pacman for PRoot
-        Box::new(install_dependencies),         // Step 4. Install dependencies
-        Box::new(setup_firefox_config),         // Step 5. Setup Firefox config
-        Box::new(setup_lxqt_scaling),           // Step 6. Setup LXQt HiDPI scaling
-        Box::new(fix_xkb_symlink),              // Step 7. Fix xkb symlink (last)
+        Box::new(patch_ubuntu_rootfs),          // Step 3. Patch Ubuntu rootfs
+        Box::new(setup_firefox_config),         // Step 4. Setup Firefox config
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {

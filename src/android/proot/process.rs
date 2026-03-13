@@ -321,6 +321,46 @@ impl ArchProcess {
         self
     }
 
+    /// Extract rootfs using proot with host root to avoid permission issues.
+    /// Uses --link2symlink and tar --no-same-owner for clean extraction.
+    /// Note: Tar will exit with error code due to absolute paths in archive,
+    /// but most files will still extract successfully. Check for critical files.
+    pub fn extract_rootfs(
+        tar_path: &str,
+        target_dir: &str,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        let context = get_application_context();
+        let proot_loader = context.native_library_dir.join("libproot_loader.so");
+
+        let mut process = Command::new(context.native_library_dir.join("libproot.so"));
+        process
+            .env("PROOT_LOADER", proot_loader)
+            .env("PROOT_TMP_DIR", context.data_dir)
+            .env_remove("LD_PRELOAD")
+            .arg("-r") // Use host root (/) since target doesn't exist yet
+            .arg("/")
+            .arg("-L")
+            .arg("--link2symlink")
+            .arg("--kill-on-exit")
+            .arg("--root-id")
+            .arg("--bind=/dev")
+            .arg("--bind=/proc")
+            .arg("--bind=/sys")
+            .arg("tar")
+            .arg("--no-same-owner")
+            .arg("--transform=s,^/,,") // Strip leading / from paths
+            .arg("-xvzf")
+            .arg(tar_path)
+            .arg("-C")
+            .arg(target_dir);
+
+        if Self::should_use_no_seccomp() {
+            process.env("PROOT_NO_SECCOMP", "1");
+        }
+
+        process.status()
+    }
+
     pub fn exec(command: &str) -> Self {
         ArchProcess {
             command: command.to_string(),

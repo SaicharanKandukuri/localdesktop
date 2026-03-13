@@ -83,7 +83,8 @@ pub fn find_libs_in_dir(path: &Path) -> Result<HashSet<OsString>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_dir() && path.extension() == Some(OsStr::new("so")) {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !path.is_dir() && file_name.contains(".so") {
             libs.insert(entry.file_name().to_owned());
         }
     }
