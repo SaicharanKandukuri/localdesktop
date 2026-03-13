@@ -11,7 +11,7 @@ pub const ARCH_FS_ROOT: &str = "/data/data/app.polarbear/files/arch";
 #[cfg(test)]
 pub const ARCH_FS_ROOT: &str = "/data/local/tmp/arch";
 
-pub const ARCH_FS_ARCHIVE: &str = "https://github.com/RandomCoderOrg/udroid-download/releases/download/V3R110/noble-raw-arm64.tar.gz";
+pub const ARCH_FS_ARCHIVE: &str = "https://github.com/SaicharanKandukuri/localdesktop/releases/download/v1.5.2/linuxfs-stripped.tar.gz";
 
 pub const WAYLAND_SOCKET_NAME: &str = "wayland-0";
 
